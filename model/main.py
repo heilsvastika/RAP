@@ -1,226 +1,233 @@
 import os
 import time
 import argparse
-import tensorflow as tf
+import sys
+from parser1 import Parser1
 import math
-from tensorflow.python.framework import ops
-from sampler import WarpSampler
-from util import *
 from sampler import *
-from model import *
+import torch
+from torch import nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+from torch.backends import cudnn
+import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
+from util import *
+from rap import RAP
+import random
 from critic import CriticNetwork
 from actor import ActorNetwork
+from mlp import MLP
 
-def sampling_RL(sess,args,actor,critic,inputs,vec,pos,length,epsilon=0.,Random=True):
-    pad=np.zeros((1,args.dim),dtype=np.float32)
-    padding=tf.convert_to_tensor(pad)
-    nxt=pos[-1]
-    nxt_vec=critic.create_vec(nxt)
-    current_lower_state=tf.concat([padding,nxt_vec],axis=1)
-    vec=critic.create_vec(inputs)
-    actions=[]
-    states=[]
-    #sampling actions
-    for i in range(length):
-        predicted=actor.predict_target(current_lower_state,vec[0][i])
-        states.append([current_lower_state,vec[0][pos]])
+
+def Sample_RL(args, actor, critic, seq, x_embed, nxt, embed, Random=True):
+    # current_lower_state=torch.zeros(1,2*self.hidden_size)
+    nxt = torch.LongTensor([nxt])     # Target item
+    current_lower_state = embed(nxt)  # get the embedding of target item
+
+    # print("current_lower_state.size:",current_lower_state.size())
+    actions = []     # action list
+    states = []      # state list
+    seq_r = []       # sequence retained
+    seq_d = []       # sequence deleted
+    len_r = 0        # the length of sequence retained
+    len_d = 0        # the length of sequence deleted
+    prob_r = []      # the probability of sequence retained
+    prob_d = []      # the probability of sequence deleted
+    for pos in range(0, args.maxlen):
+        # learn the action policy
+        predicted = actor.get_target_output(current_lower_state, x_embed[pos], scope="target")
+        states.append([current_lower_state, x_embed[pos]])
         if Random:
-            if random.random() > epsilon:
-                action=(0 if random.random()<predicted[0] else 1)
+            if random.random() > args.epsilon:
+                action = (0 if random.random() < float(predicted[0].item()) else 1)
             else:
-                action=(1 if random.random()<predicted[0] else 0)
+                action = (1 if random.random() < float(predicted[0].item()) else 0)
         else:
-            action=np.argmax(predicted)
+            action = np.argmax(predicted).item()
         actions.append(action)
-        if action==1:
-            out_d,current_lower_state=critic.lower_LSTM_target(current_lower_state,[[inputs[i]]])
-    Rinput=[]
-    Rinput_del=[]
-    for (i,a) in enumerate(actions):
-        if a==1:
-            Rinput.append(inputs[i])
+        if action == 1:
+            out_d, current_lower_state = critic.forward_lstm(current_lower_state, seq[pos], "target")
+            prob_r.append(float(predicted[0].item()))
         else:
-            Rinput_del.append(inputs[i])
-    Rlength=len(Rinput)
-    Rlength_del=len(Rinput_del)
-    if Rlength==0:
-        actions[-1]=1
-        Rinput.append(inputs[-1])
-        Rlength=1
-    Rinput+=[0]*(args.maxlen-Rlength)
-    return actions,states,Rinput,Rlength,Rinput_del,Rinput_del
-
-
-def train(sess,args,actor,critic,sampler,dataset,batch_size,samplecnt=5,LSTM_trainable=True,RL_trainable=True):
-    #print("training :total ",len(user_train),"nodes.")
-    #random.shuffle(user_train)
-
-    [user_train,user_valid,user_test,usernum,itemnum]=copy.deepcopy(dataset)
-    sess.run(tf.global_variables_initializer())
-    for b in range(int(math.floor(len(user_train)/batch_size))):
-        u,seq,pos,_= sampler.next_batch()
-        totloss=0.
-        critic.assign_active_network()
-        actor.assign_active_network()
-        for i in range(batch_size):
-            seq=seq[i]
-            length=len(seq)
-
-            #train the predict network
-            if RL_trainable:
-                actionlist,statelist,losslist=[],[],[]
-                aveloss=0.
-                for j in range(samplecnt):
-                    actions,states,Rinput,Rlength,Rinput_del,Rlength_del=sampling_RL(sess,args,actor,critic,seq[i],critic.create_vec([seq[i]]),pos[i][-1],length,epsilon=0.,Random=True)
-                    actionlist.append(actions)
-                    statelist.append(states)
-                    out1,loss1=critic.getloss([Rinput],[Rlength],[pos[i][-1]])
-                    out2,loss2=critic.getloss([Rinput_del],[Rlength_del],[pos[i][-1]])
-                    p1=out1[pos[i][-1]-1]
-                    p2=out2[pos[i][-1]-1]
-                    aveloss+=loss1+loss2
-                    losslist.append(loss1+loss2)
-                    reward1=tf.log(p1)
-                    reward2=tf.log(p2)
-                    reward=reward1-reward2
-                    g=actor.get_gradient(statelist[i][pos][0],statelist[i][pos[1]],reward)
-                    if grad == None:
-                        grad=g
-                    else:
-                        grad[0]+=g[0]
-                        grad[1]+=g[1]
-                        grad[2]+=g[2]
-                actor.train(grad)
-                aveloss/=samplecnt
-                totloss+=aveloss
-
-                grad=None
-        if RL_trainable:
-            actor.update_target_network()
-            if LSTM_trainable:
-                critic.update_target_network()
+            prob_d.append(float(predicted[0].item()))
+    for (i, a) in enumerate(actions):
+        if a == 1:
+            seq_r.append(int(seq[i].item()))
         else:
-            critic.assign_target_network()
+            seq_d.append(int(seq[i].item()))
+    len_r = len(seq_r)
+    len_d = len(seq_d)
+    if len(prob_r) == 0:
+        prob_r.append(0.0)
+    if len(prob_d) == 0:
+        prob_d.append(0.0)
+
+    if len_r == 0:
+        actions[args.maxlen - 2] = 1
+        seq_r.append(seq[args.maxlen - 2])
+        len_r = 1
+    if len_d == 0:
+        actions[0] = 1
+        seq_d.append(seq[0])
+        len_d = 1
+    # seq_r+=[1]*(self.maxlen-len_r)
+
+    seq_r = torch.tensor(seq_r).view(1, -1)
+
+    return actions, states, seq_r, len_r, seq_d, len_d, prob_r, prob_d
 
 
+def train_model(actor,critic,user_train,itemnum,sampler,args,embed,RL_train=True,LSTM_train=True):
+    # get the batch number
+    num_batch = int(math.floor(len(user_train)/args.batch_size))
+
+    # critic network optimizer
+    critic_target_optimizer = torch.optim.Adam(critic.target_pred.parameters())
+    critic_active_optimizer = torch.optim.Adam(critic.active_pred.parameters())
+
+    # actor network optimizer
+    actor_target_optimizer = torch.optim.Adam(actor.target_policy.parameters())
+    actor_active_optimizer = torch.optim.Adam(actor.active_policy.parameters())
+
+    # two LSTM networks for two subsequences respectively
+    lstm1 = nn.LSTM(input_size=args.embed_dim, hidden_size=args.hidden_size, num_layers=1,
+                    batch_first=True)
+    lstm2 = nn.LSTM(input_size=args.embed_dim, hidden_size=args.hidden_size, num_layers=1,
+                    batch_first=True)
+    # two MLPs
+    classifier1 = MLP(args.hidden_size, itemnum)
+    classifier2 = MLP(args.hidden_size, itemnum)
+    # Softmax
+    sg = nn.Sigmoid()
+    # f = open(os.path.join('./data/obj.txt'), 'w')
+    loss_fn = F.cross_entropy
+
+    # process one batch of dataset
+    for i in range(num_batch):
+        u, seq, nxt = sampler.next_batch()   # user,sequence,target item
+        u = np.array(u)     # user should plus one
+        seq = np.array(seq)
+        nxt = np.array(nxt)
+
+        seq0 = seq     # initial sequence
+        seq = torch.LongTensor([seq])  # (1,batch_size,maxlen)
+
+        # print("seq0.view(1,-1):",seq0.view(1,-1))
+        # define hidden states and cell states of subsequences through the LSTMs
+        h_r0 = torch.zeros([1, 1, args.hidden_size])
+        c_r0 = torch.zeros([1, 1, args.hidden_size])
+        h_d0 = torch.zeros([1, 1, args.hidden_size])
+        c_d0 = torch.zeros([1, 1, args.hidden_size])
+
+        # embed the sequence into tensor
+        x_embed = embed(seq)
+
+        critic.train()
+        actor.train()
+        critic_active_optimizer.zero_grad()
+        critic_target_optimizer.zero_grad()
+
+        actionlist = []     # action list
+        statelist = []      # state list
+        losslist = []
+        objlist = []
+        avgloss = 0.0
+        aveloss = 0.0
+        totloss = 0.0
+
+        r_sum=0.
+        # model training in one batch of dataset
+        for j in range(0, args.batch_size):
+            r = 0.
+            for k in range(args.samplecnt):
+                actions,states,seq_r,len_r,seq_d,len_d,prob_r,prob_d=Sample_RL(args,actor,critic,seq[0][j],
+                                                                            x_embed[0][j], nxt[j], embed)
+                #print("actions:",actions)
+                # print("seq:",seq[0][i])
+                # print("nxt:",nxt[i])
+
+                actionlist.append(actions)
+                statelist.append(states)
+
+                # Add the target item to the two subsequences split from sequence
+                seq_r0 = seq_r[0]      # subsequence retained
+                seq_d0 = seq_d         # subsequence deleted
+                seq_r1 = seq_r0.numpy().tolist()
+                # check the lengths of two subsequences
+                #print("the length of seq_r1:",len(seq_r1))
+                #print("the length of seq_d0:",len(seq_d))
+
+                seq_r2 = torch.LongTensor([seq_r1])
+                seq_d2 = torch.LongTensor([seq_d0])
+                nxt1 = torch.LongTensor([nxt[j]])
+                seq_rt = embed(seq_r2)
+                seq_dt = embed(seq_d2)
+                nxt2 = embed(nxt1)    # the embedding of target item
+
+                output_r, (h_rn, c_rn) = lstm1(seq_rt, (h_r0, c_r0))  # output:(128,maxlen,50), hn-cn:(1,maxlen,50)
+                output_d, (h_dn, c_dn) = lstm2(seq_dt, (h_d0, c_d0))
+
+                output1_0 = h_rn[0]    # the output of positive subsequence through the LSTM
+                output2_0 = h_dn[0]    # the output of negative subsequence through the LSTM
+
+                mlp1=MLP(args.hidden_size,args.embed_dim)
+                mlp2=MLP(args.hidden_size,args.embed_dim)
+                output1 = mlp1.forward(output1_0)
+                output2 = mlp2.forward(output2_0)
+                reward1 = torch.cosine_similarity(output1,nxt2,dim=1)
+                reward2 = torch.cosine_similarity(output2,nxt2,dim=1)
+
+                # calculate the probability of subsequences
+                p1 = 1.0
+                p2 = 1.0
+                for _, prob_r1 in enumerate(prob_r):
+                    p1 *= prob_r1
+                for _, prob_d1 in enumerate(prob_d):
+                    p2 *= (1 - prob_d1)
+
+                # calculate the reward
+                r1 = p1 * reward1     # reward for positive subsequence
+                r2 = p2 * reward2     # reward for negative subsequence
+                reward = r1 - r2
+                r += reward
+            r_avg = r/(k+1)
+            r_sum += r_avg
+            r_sum_avg = r_sum/(args.batch_size)     # reward for one batch
+        print("r_sum_avg:",r_sum_avg.item())
+
+                #a = torch.FloatTensor(1, itemnum).zero_()
+                #b = a.scatter(dim=1, index=torch.LongTensor([[nxt[j] - 1]]), value=1)
+                #y = nxt[j] - 1
 
 
-def test(sess,args,actor,critic,dataset,noRL=False):
-    [train,valid,test,usernum,itemnum]=copy.deepcopy(dataset)
-    ndcg=hit=0.0
-    test_user=0.0
-    list_test_user=list(range(0,usernum))
-    if usernum>1000000:
-        users=random.sample(list_test_user,20000)
-    else:
-        users=list_test_user
-    for u in users:
-        seq=np.zeros([args.maxlen],dtype=np.int32)
-        idx=args.maxlen-1
-        seq[idx]=test[u]
-        idx-=1
-        for i in reversed(train[u]):
-            seq[idx]=i
-            idx-=1
-            if idx == -1:
-                break
-            rated=set(train[u])
-            item_idx=[test[u]]
-            for _ in range(999):
-                t=np.random.randint(0,itemnum)
-                while t in rated:
-                    t=np.random.randint(0,itemnum)
-                item_idx.append(t)
-            actions,states,Rinput,Rlength,Rinput_del,Rlength_del=sampling_RL(sess,args,actor,critic,[seq],critic.create_vec(seq),[item_idx[0]])
-            predictions=-critic.predict_target([Rinput],[Rlength],[item_idx[0]])
-            #out2=critic.predict_target([Rinput_del],[Rlength_del],[item_idx[0]])
-            item_idx=np.array(item_idx)
-            pred=item_idx[np.argsort(predictions[0])]
-            test_user+=1
-            if item_idx[0] in pred[:10]:
-                hit+=1
-            idcg=np.sum(1/np.log(np.arange(2,1+2)))
-            dcg=0.0
-            for i,p in enumerate(pred[:10]):
-                if p==item_idx[0]:
-                    dcg+=1/np.log2(i+2)
-            ndcg+=dcg/idcg
-            if test_user % 100 == 0:
-                sys.stdout.flush()
-    return hit/test_user,ndcg/test_user
 
 
 def main():
-    def str2bool(s):
-        if s not in {'False','True'}:
-            raise ValueError('Not a valid boolean string')
-        return s=='True'
+    # get parser
+    argv = sys.argv[1:]
+    parser = Parser1().getParser()
+    args, _ = parser.parse_known_args(argv)
+    random.seed(args.seed)
 
-    parser=argparse.ArgumentParser()
-    parser.add_argument('--datatrain',default='ml-1m',type=str)
-    parser.add_argument('--train_dir',default='-1',type=str)
-    parser.add_argument('--batch_size',default=128,type=int)
-    parser.add_argument('--lr',default=0.0001,type=float)
-    parser.add_argument('--maxlen',default=100,type=int)
-    parser.add_argument('--dim',default=100,type=int)
-    parser.add_argument('--dropout',default=0.005,type=float)
-    parser.add_argument('--l2_emb',default=0.0,type=float)
-    parser.add_argument('--optimizer',default='Adam',type=str)
-    args=parser.parse_args()
+    dataset = data_partition(args.datatrain)
+    [user_train, user_valid, user_test, usernum, itemnum] = dataset
 
-    if not os.path.isdir(args.datatrain+'_' +args.train_dir):
-        os.makedirs(args.datatrain+'_'+args.train_dir)
-
-    dataset=data_partition(args.datatrain)
-    [user_train,user_valid,user_test,usernum,itemnum]=dataset
-
-    num_batch=int(math.floor(len(user_train)/args.batch_size))
-    cc=0.0
+    num_batch = int(math.floor(len(user_train) / args.batch_size))
+    cc = 0.0
     for u in user_train:
-        cc+=len(user_train[u])
-    print('average sequence length:%.2f'%(cc/len(user_train)))
+        cc += len(user_train[u])
+    print('average sequence length: %.2f' % (cc / len(user_train)))
 
-    config=tf.ConfigProto()
-    config.gpu_options.allow_growth=True
-    config.allow_soft_placement=True
+    embed = nn.Embedding(itemnum, args.embed_dim)
+    sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
 
-    with tf.Graph().as_default(),tf.Session() as sess:
-        model=Model(usernum, itemnum, args, reuse=None)
-        sess.run(tf.global_variables_initializer())
-        coord=tf.train.Coordinator()
-        threads=tf.train.start_queue_runners(coord=coord)
-        totloss=0.0
-        sampler=WarpSampler(user_train,usernum,itemnum,batch_size=args.batch_size,maxlen=args.maxlen,n_workers=3)
-        for epoch in range(1,args.num_epochs+1)
-            u, seq, pos, _ = sampler.next_batch()
-            u = np.array(u)
-            seq = np.array(seq)
-            seq,table=model.embed_seq(sess,seq)
+    critic=CriticNetwork(args,itemnum,embed)
+    actor=ActorNetwork(args)
+    for epoch in range(args.num_epochs):
+        train_model(actor,critic,user_train,itemnum,sampler,args,embed)
 
-            #model
-            critic = CriticNetwork(sess, args, table)
-            print("num_other_variables:",critic.num_other_variables)
-            print("len(network params):",len(critic.network_params))
-            print("len(target network params):",len(critic.target_network_params))
-            actor = ActorNetwork(sess,args)
 
-            saver=tf.train.Saver()
-            #for item in tf.trainable_variables():
-            #    print(item.name,item.get_shape())
-            sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
 
-            train(sess,args,actor,critic,sampler,dataset,samplecnt=5,LSTM_trainable=True,RL_trainable=True)
-            print("epoch ", epoch, "total loss:", totloss)
-            critic.assign_target_network()
-
-            hit1,ndcg1=test(sess,actor,critic,user_valid,True)
-            hit2,ndcg2=test(sess,actor,critic,user_test,True)
-
-            if b % 5 == 0:
-                hit1, ndcg1 = test(sess, actor, critic, user_test)
-                hit2, ndcg2 = test(sess, actor, critic, user_test)
-                print("epoch ", b, "total loss:", totloss, "-----valid----ndcg:", ndcg1, ",hit:", hit1,
-                  "-----test----ndcg:", ndcg2, ",hit:", hit2)
-
-if __name__=="__main__":
+if __name__=='__main__':
     main()
