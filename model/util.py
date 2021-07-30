@@ -5,7 +5,6 @@ from collections import defaultdict
 import numpy as np
 from multiprocessing import Process,Queue
 import pickle
-import tensorflow as tf
 
 
 def data_partition(fname1):
@@ -53,36 +52,3 @@ def data_partition(fname1):
         user_test[user]=User[user][-1]
 
     return [user_train,user_valid,user_test,usernum,itemnum+1]
-
-
-def normalize(inputs,epsilon=1e-8,scope='ln',reuse=None):
-    with tf.variable_scope(scope,reuse=reuse):
-        inputs_shape=inputs.get_shape()
-        params_shape=inputs_shape[-1:]
-
-        mean,variance=tf.nn.moments(inputs,[-1],keep_dims=True)
-        beta=tf.Variable(tf.zeros(params_shape))
-        gamma=tf.Variable(tf.ones(params_shape))
-        normalized=(inputs-mean)/((variance+epsilon)**(.5))
-        outputs=gamma * normalized + beta
-    return outputs
-
-def embedding(inputs, vocab_size, dim, zero_pad=True, scale=True, l2_reg=0.0, scope="embedding",
-                  with_t=False, reuse=None):
-    with tf.variable_scope(scope, reuse=reuse):
-        lookup_table = tf.get_variable('lookup_table',
-                                       dtype=tf.float32,
-                                       shape=[vocab_size, dim],
-                                       # initializer=tf.contrib.layers.xavier_initializer(),
-                                       regularizer=tf.contrib.layers.l2_regularizer(l2_reg))
-        if zero_pad:
-            lookup_table = tf.concat((tf.zeros(shape=[1, dim]),
-                                      lookup_table[1:, :]), 0)
-        outputs = tf.nn.embedding_lookup(lookup_table, inputs)
-
-        if scale:
-            outputs = outputs * (dim ** 0.5)
-    if with_t:
-        return outputs, lookup_table
-    else:
-        return outputs
