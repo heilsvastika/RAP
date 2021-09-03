@@ -37,10 +37,6 @@ samplecnt=5
 epsilon=0.05
 alpha=0.1
 
-def normalize(inputs,epsilon):
-    inputs_shape=inputs.get_shape()
-    params_shape=inputs_shape[-1:]
-
 
 def Sample_RL(actor, critic, seq, x_embed, nxt, embed, Random=True):
     # current_lower_state=torch.zeros(1,2*self.hidden_size)
