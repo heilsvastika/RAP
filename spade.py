@@ -3,7 +3,7 @@ import pandas as pd
 from collections import defaultdict
 import numpy as np
 
-# load the dataset 
+# load the dataset
 def data_partition(fname):
     usernum = 0
     itemnum = 0
@@ -57,7 +57,7 @@ def SPADE(sequences, support, length) -> {}:
             frequent_k_sequences = defaultdict(int)
             for sequence in sequences:
                 for i in range(len(sequence) - k + 1):
-                    # 长度为k的序列
+                    # the sequence whose length is equivalent to k
                     subsequence = sequence[i:i + k - 1]
                     for j in range(i + k - 1, len(sequence)):
                         if sequence[j] not in subsequence:
