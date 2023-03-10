@@ -1,9 +1,9 @@
-# 采用SPADE算法从dataset中抽取序列模式
+# extract sequential patterns from dataset via SPADE algorithm
 import pandas as pd
 from collections import defaultdict
 import numpy as np
 
-# 加载数据集
+# load the dataset 
 def data_partition(fname):
     usernum = 0
     itemnum = 0
@@ -27,9 +27,8 @@ def data_partition(fname):
 
     return data, usernum, itemnum
 
-
-# Define the SPADE algorithm，根据length返回从1到length之间所有长度的序列模式的字典patterns_dict
-def SPADE(sequences, support, length):
+# Define the SPADE algorithm, return a patterns_dict including the sequential patterns whose length is equivalent to 1~length
+def SPADE(sequences, support, length) -> {}:
     # Initialize the frequent patterns dictionary
     frequent_patterns = defaultdict(int)
     patterns_dict = {}
@@ -80,3 +79,19 @@ def SPADE(sequences, support, length):
     frequent_patterns = {pattern: count for pattern, count in frequent_patterns.items() if len(pattern) == 5}
 
     return patterns_dict
+
+# generate the pattern_matrix according to the patterns_dict
+def gen_ptn_mx(patterns_dict):
+    ptn_mx_dict = {}
+    if patterns_dict:
+        # generate a n*n matrix, where n=itemnum, elements in the matrix have default values
+        for i in range(1, len(patterns_dict)):
+            # the n*n matrix store the times coexistence of item ei and ej
+            ptn_mx = np.full((itemnum, itemnum), 0, dtype=np.uint8)
+            num = int(i) + 1
+            for u, v in patterns_dict[str(num)].items():
+                start = u[0] - 1
+                end = u[-1] - 1
+                ptn_mx[start][end] = v
+            ptn_mx_dict[str(i + 1)] = ptn_mx
+    return ptn_mx_dict
